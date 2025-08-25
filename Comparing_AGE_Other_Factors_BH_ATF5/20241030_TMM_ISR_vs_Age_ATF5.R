@@ -1,0 +1,681 @@
+
+
+
+#This code currently gets the log2 TMM expression of ATF5, then centers and scales it, and then compared the pc2 score (which also gets centerd and scaled) for each tissue
+
+# Uncommented out many of the "print" plots
+
+#Sub in ATF5 for ATF5 (or CHOP or ATF5)
+
+rm(list = ls())
+
+# BiocManager::install("edgeR")
+
+library(tidyverse)
+library(edgeR)
+library(corrr)
+library(dplyr)
+library(tibble)
+library(ggpubr)
+library(readr)
+library(ggplot2)
+library(ComplexHeatmap)
+library(circlize)
+library(beepr)
+library(ggplot2)
+library(ggpubr)
+library(FSA)      # For Dunn's test
+library(dplyr)
+
+# Set the base path
+path <- "/Users/janell/Library/CloudStorage/GoogleDrive-janells29@gmail.com/.shortcut-targets-by-id/1pUjuYVHpRn5G2HeHNW2X0DBAVzvL-vMa/MitoLab - General/ Members Folders/Janell/R_Code/2024_08_29_fb_gtex"
+setwd(path)
+
+Plot_Save = "ON"
+chosen_Factor <- "Factor1"
+chosen_Gene <- "ATF5"
+#------------------------------------------------------
+Folder_name <- paste0("2024_10_30_All_Factors_AGE_", chosen_Gene)
+#------------------------------------------------------
+
+
+folder_path_1stfolder <- paste0(path, "/1_Scripts/gtex/Comparing_AGE_Other_Factors_BH_", chosen_Gene)
+
+# Check if the folder exists
+if (!dir.exists(folder_path_1stfolder)) {
+  # If it doesn't exist, create the folder
+  dir.create(folder_path_1stfolder, recursive = TRUE)
+  cat("Folder created at:", folder_path_1stfolder, "\n")
+} else {
+  cat("Folder already exists at:", folder_path_1stfolder, "\n")
+}
+
+folder_path <- paste0(folder_path_1stfolder, "/", Folder_name)
+
+# Check if the folder exists
+if (!dir.exists(folder_path)) {
+  # If it doesn't exist, create the folder
+  dir.create(folder_path, recursive = TRUE)
+  cat("Folder created at:", folder_path, "\n")
+} else {
+  cat("Folder already exists at:", folder_path, "\n")
+}
+
+
+# Read necessary input files
+gtex_input <- paste0(path, "/1_Scripts/gtex")
+Atts_COD_readin <- file.path(paste0(gtex_input, "/Attibutes_Phenos_Merged_plus_COD.R"))
+source(Atts_COD_readin)
+
+setwd(path)
+getwd()
+
+# correlations_readin <- file.path(paste0(gtex_input, "/2024_09_23_correlations_for_scaling.csv")) 
+# correlations <- read.csv(correlations_readin)
+
+
+# Path to the folder containing individual tissue folders
+#########################################################################################################
+individual_tissues_folder <- paste0(path, "/2_InputFiles/gtex/All_Tissues_Indiv_Folders")
+# individual_tissues_folder <- paste0(path, "/2_InputFiles/gtex/Single_Tissue/brain") #using brain only for testing
+#########################################################################################################
+
+# Debug: print the path to check if it is correct
+print(individual_tissues_folder)
+
+
+# Create empty dataframe to store results
+results_df <- data.frame(Tissue = character(),
+                         Comparison = character(),
+                         Spearman_Rho = numeric(),
+                         P_Value = numeric(),
+                         Asterisks = character(),
+                         stringsAsFactors = FALSE)
+
+
+# Initialize an empty list to store results from each tissue
+all_results <- list()
+
+all_dunn_res <- data.frame()
+# Initialize lists to collect data needed for plotting
+boxplot_data_list <- list()
+cohens_d_results_list <- list()
+
+
+# Get a list of all subdirectories within the main folder
+subfolders <- list.dirs(individual_tissues_folder, recursive = FALSE, full.names = TRUE)
+
+# Loop through each subfolder
+for (folder in subfolders) {
+  # Print the folder name
+  print(paste("Processing folder:", basename(folder)))
+  
+  last_component <- basename(folder)
+  
+  # Set the path to the current folder
+  current_folder <- folder
+  
+  correlations_readin <- file.path(paste0(gtex_input, "/2024_09_23_correlations_for_scaling.csv")) 
+  correlations <- read.csv(correlations_readin)
+  
+  
+  
+  # Print the last component
+  print(last_component)
+  
+  
+  # new_folder_path <- paste0(path, "/3_Outputs/gtex/", Folder_name, "/", last_component)
+  # 
+  # # Check if the folder exists
+  # if (!dir.exists(new_folder_path)) {
+  #   # If it doesn't exist, create the folder
+  #   dir.create(new_folder_path, recursive = TRUE)
+  #   cat("Folder created at:", new_folder_path, "\n")
+  # } else {
+  #   cat("Folder already exists at:", new_folder_path, "\n")
+  # }
+  # 
+  
+  # Get a list of all .gz files in the tissue folder
+  gz_files <- list.files(folder, pattern = "\\.gz$", full.names = TRUE) # CHANGE BACK TO THIS AFTER DONE WITH BRAIN
+  # gz_files <- list.files(individual_tissues_folder, pattern = "\\.gz$", full.names = TRUE)
+  
+  # Initialize dataframes for each tissue
+  df_tissue_list <- list()
+  gene_symbols <- NULL
+  
+  # Loop through each .gz file and read data
+  for (gz_file in gz_files) {
+    file_name <- basename(gz_file)
+    tissue <- sub(".*_v8_(.*?)\\.gct\\.gz", "\\1", file_name)
+    
+    # Read data from the current .gz file
+    raw_gene_counts <- read.delim(gz_file, skip = 2)
+    
+    # Extract gene symbols if not already done
+    if (is.null(gene_symbols)) {
+      gene_symbols <- raw_gene_counts[, 2:3]
+    }
+    
+    # Extract sample IDs and gene counts
+    gene_counts <- raw_gene_counts %>%
+      select(-id, -Description) %>%
+      as.data.frame()
+    
+    # Store the gene counts in the dataframe list with tissue name
+    df_tissue_list[[tissue]] <- gene_counts
+  }
+  
+  # Combine dataframes if there are multiple files
+  combined_gene_counts <- gene_symbols
+  for (tissue in names(df_tissue_list)) {
+    combined_gene_counts <- combined_gene_counts %>%
+      left_join(df_tissue_list[[tissue]], by = "Name")
+  }
+  
+  # Remove the "Description" column if it exists
+  if ("Description" %in% colnames(combined_gene_counts)) {
+    combined_gene_counts <- combined_gene_counts %>%
+      select(-Description)
+  }
+  
+  combined_gene_counts <- combined_gene_counts %>%
+    column_to_rownames("Name")
+  
+  annotations_sample_attributes_filtered <- annotations_merged %>%
+    filter(SAMPID %in% colnames(combined_gene_counts))
+  
+  # TMM normalization
+  dge <- DGEList(combined_gene_counts[, annotations_sample_attributes_filtered$SAMPID], group = factor(annotations_sample_attributes_filtered$COD))
+  keep <- filterByExpr(dge)
+  dge <- dge[keep, , keep.lib.sizes = FALSE]
+  dge <- calcNormFactors(dge, method = "TMM")
+  exprs <- cpm(dge, log = TRUE) # changed from FALST to TRUE 9/27/2024 
+  
+  gene_symbols <- gene_symbols %>%
+    mutate(Description = ifelse(Description == "KIAA0141", "DELE1", Description),  # changing so that DELE1 is the gene symbol
+           Description = ifelse(Description == "WARS", "WARS1", Description),
+           Description = ifelse(Description == "NARS", "NARS1", Description))
+  
+  
+  # Join with gene symbols
+  exprs <- exprs %>%
+    as.data.frame() %>%
+    rownames_to_column("Name") %>%
+    full_join(gene_symbols, by = "Name") %>%
+    na.omit() %>%
+    select(-Name) %>%
+    rename("Gene" = Description)
+  
+  # Filter genes of the ISR only into our exprs
+  exprs_ISR <- exprs %>%
+    filter(Gene %in% Total_ISR_List$Gene) %>%
+    column_to_rownames("Gene") %>%
+    t() %>%
+    as.data.frame() %>%
+    rownames_to_column("SAMPID") %>%
+    unique()
+  
+  
+  #------------------ finding missing genes ----------------------
+  
+  # Step 1: Extract gene names
+  exprs_genes <- colnames(exprs_ISR)[-1]
+  list_genes <- Total_ISR_List$Gene
+  
+  # Step 2: Standardize gene names
+  exprs_genes_clean <- trimws(toupper(exprs_genes))
+  list_genes_clean <- trimws(toupper(list_genes))
+  
+  # Remove duplicates if necessary
+  exprs_genes_clean <- unique(exprs_genes_clean)
+  list_genes_clean <- unique(list_genes_clean)
+  
+  # Step 3: Find missing genes
+  genes_in_exprs_not_in_list <- setdiff(exprs_genes_clean, list_genes_clean)
+  genes_in_list_not_in_exprs <- setdiff(list_genes_clean, exprs_genes_clean)
+  
+  # Step 4: Print results
+  if (length(genes_in_exprs_not_in_list) > 0) {
+    cat("Genes in exprs_ISR but not in Total_ISR_List:\n")
+    print(genes_in_exprs_not_in_list)
+  } else {
+    cat("All genes in exprs_ISR are present in Total_ISR_List.\n")
+  }
+  
+  if (length(genes_in_list_not_in_exprs) > 0) {
+    cat("Genes in Total_ISR_List but not in exprs_ISR:\n")
+    print(genes_in_list_not_in_exprs)
+  } else {
+    cat("All genes in Total_ISR_List are present in exprs_ISR.\n")
+  }
+  
+  # Check if there are missing genes
+  if (length(genes_in_list_not_in_exprs) > 0 || length(genes_in_exprs_not_in_list) > 0 ) {
+    cat(paste("Missing genes detected in folder:", last_component, "- Skipping this folder.\n"))
+    # Skip to the next iteration of the loop
+    next
+  }
+  
+  #-------------------------------------------------------------------------------------------------------  
+  
+  # CHANGING THIS mean centering and scaling needs to be performed using fibroblast data
+  ###################################################################################################
+  pathtoMEANofX <- file.path(paste0(path, "/2_InputFiles/gtex/2024_09_23_meanx_for_scaling.csv")) 
+  mean_x_fbdata <- read.csv(pathtoMEANofX)
+  
+  pathtoSDofX <- file.path(paste0(path, "/2_InputFiles/gtex/2024_09_23_sdx_for_scaling.csv")) 
+  sd_x_fbdata <- read.csv(pathtoSDofX)
+  ###################################################################################################
+  
+  # Rename columns using dplyr
+  sd_x_fbdata <- sd_x_fbdata %>%
+    rename(
+      Gene = X,
+      sd = x
+    )
+  
+  # Rename columns using dplyr
+  mean_x_fbdata <- mean_x_fbdata %>%
+    rename(
+      Gene = X,
+      mean = x
+    )
+  
+  sd_x_fbdata <- sd_x_fbdata %>%
+    left_join(mean_x_fbdata %>% select(Gene, mean), by = "Gene")
+  
+  
+  # Step 1: Extract gene names from exprs_ISR (excluding SampID)
+  gene_columns <- setdiff(names(exprs_ISR), "SAMPID")
+  
+  # Step 2: Ensure that gene names match between exprs_ISR and sd_x_fbdata
+  common_genes <- intersect(gene_columns, sd_x_fbdata$Gene)
+  # view(common_genes)
+  
+  
+  #Finding any missing genes
+  # Step 1: Extract gene names
+  exprs_genes <- setdiff(names(exprs_ISR), "SAMPID")
+  sd_genes <- sd_x_fbdata$Gene
+  
+  # Step 2: Standardize gene names
+  exprs_genes_clean <- trimws(toupper(exprs_genes))
+  sd_genes_clean <- trimws(toupper(sd_genes))
+  
+  # Step 3: Find missing genes
+  genes_in_exprs_not_in_sd <- setdiff(exprs_genes_clean, sd_genes_clean)
+  genes_in_sd_not_in_exprs <- setdiff(sd_genes_clean, exprs_genes_clean)
+  
+  # Step 4: Print missing genes
+  if (length(genes_in_exprs_not_in_sd) > 0) {
+    cat("Genes in exprs_ISR but not in sd_x_fbdata:\n")
+    print(genes_in_exprs_not_in_sd)
+  } else {
+    cat("All genes in exprs_ISR are present in sd_x_fbdata.\n")
+  }
+  
+  if (length(genes_in_sd_not_in_exprs) > 0) {
+    cat("Genes in sd_x_fbdata but not in exprs_ISR:\n")
+    print(genes_in_sd_not_in_exprs)
+  } else {
+    cat("All genes in sd_x_fbdata are present in exprs_ISR.\n")
+  }
+  
+  
+  
+  
+  #Scaling the data
+  # Step 3: Subset exprs_ISR to include only the common genes
+  exprs_ISR_subset <- exprs_ISR[, c("SAMPID", common_genes)]
+  
+  # Step 4: Create named vectors for mean and sd
+  mean_values <- sd_x_fbdata$mean
+  names(mean_values) <- sd_x_fbdata$Gene
+  
+  sd_values <- sd_x_fbdata$sd
+  names(sd_values) <- sd_x_fbdata$Gene
+  
+  # Subset mean and sd to include only common genes
+  mean_values <- mean_values[common_genes]
+  sd_values <- sd_values[common_genes]
+  
+  # Check for zero standard deviations
+  if (any(sd_values == 0)) {
+    stop("Standard deviation is zero for some genes. Cannot perform scaling.")
+  }
+  
+  # Step 5: Manually scale the data
+  exprs_ISR_scaled <- exprs_ISR_subset
+  
+  for (gene in common_genes) {
+    exprs_ISR_scaled[[gene]] <- (exprs_ISR_subset[[gene]] - mean_values[gene]) / sd_values[gene]
+  }
+  
+  
+  exprs_ATF5 <- exprs_ISR_scaled %>%
+    select(SAMPID, ATF5)
+  
+  # # Join with subject phenotypes
+  exprs_ATF5 <- exprs_ATF5 %>%
+    full_join(annotations_sample_attributes_filtered, by = "SAMPID") %>%
+    select(ATF5, SAMPID, AGE, SEX) %>%
+    unique() %>%
+    na.omit()
+  #
+  # # Join with subject phenotypes
+  exprs_ATF5_tissue <- exprs_ATF5 %>%
+    full_join(annotations_sample_attributes_filtered, by = "SAMPID") %>%
+    select(ATF5, SMTSD, SAMPID) %>%
+    unique() %>%
+    na.omit()
+  
+  ########################################################################################
+  
+  scaled_exprs_ISR <- exprs_ISR_scaled %>%
+    full_join(annotations_sample_attributes_filtered, by = "SAMPID") %>%
+    unique()
+  # 
+  # scaled_exprs_ISR <- scaled_exprs_ISR %>% # not sure how this is different
+  #   select(SMTSD, SUBJID, everything()) %>%
+  #   unique()
+  
+  tissue_results <- data.frame(PC = character(), Spearman_Rho = numeric(), P_Value = numeric(), regression_coefficient = numeric(), reg_p_value = numeric(), N = numeric(), stringsAsFactors = FALSE)
+  
+  
+  loadings_readin <- file.path(paste0(gtex_input, "/FacLoads_12_factors.csv")) # includes ATF5, is from folder 2024_09_23
+  loadings <- read.csv(loadings_readin)
+  loadings <- loadings %>%
+    select(X, chosen_Factor)
+  
+  
+  selected_loadings <- loadings %>%
+    rename(Gene = X, Loading = chosen_Factor) %>%
+    as.data.frame()
+  
+  common_genes <- intersect(selected_loadings$Gene, colnames(scaled_exprs_ISR))
+  selected_loadings <- selected_loadings %>%
+    filter(Gene %in% common_genes)
+  
+  # Step 1: Prepare the correlations matrix
+  rownames(loadings) <- loadings$X
+  loadings$X <- NULL
+  loadings_matrix <- as.matrix(loadings)
+  
+  scaled_data <- scaled_exprs_ISR %>%
+    select(SAMPID, all_of(common_genes))
+  
+  rownames(scaled_data) <- scaled_data$SAMPID
+  scaled_data$SAMPID <- NULL
+  scaled_data_matrix <- as.matrix(scaled_data)
+  
+  
+  # t(loadings) %*% solve(correlations)
+  # Step 1: Prepare the correlations matrix
+  rownames(correlations) <- correlations$X
+  correlations$X <- NULL
+  correlations_matrix <- as.matrix(correlations)
+  
+  W <- t(loadings_matrix) %*% solve(correlations_matrix)
+  Wtransposed <- t(W)
+  final <- scaled_data_matrix %*% Wtransposed
+  
+  final_df <- as.data.frame(final)
+  
+  final_df <- final_df %>%
+    tibble::rownames_to_column(var = "SAMPID")
+  
+  final_data <- final_df %>%
+    full_join(annotations_sample_attributes_filtered, by = "SAMPID") %>%
+    unique()
+  
+  ########################################################################################    
+  ######################################################################################## 
+  
+  
+  boxplot_data <- final_data %>%
+    select(SAMPID, chosen_Factor, AGE, SEX, DTHPLCE)
+  
+  colnames(boxplot_data)[2] <- "chosen_Factor"
+  
+  exprs_ATF5 <- exprs_ISR_scaled %>%
+    select(SAMPID, ATF5)
+  
+  boxplot_data <- boxplot_data %>%
+    left_join(exprs_ATF5, by = "SAMPID")
+  
+  # boxplot_data <- boxplot_data %>%
+  #   filter(DTHPLCE %in% c("Hospital inpatient", "Emergency room"))
+  
+  
+  # SCATTERPLOTS
+  
+  # Scatterplot for AGE vs chosen_Factor
+  rho_chosen_Factor <- cor.test(boxplot_data$AGE, boxplot_data$chosen_Factor, method = "spearman")
+  adjusted_p_chosen_Factor <- p.adjust(rho_chosen_Factor$p.value, method = "BH")
+  
+  asterisks_chosen_Factor <- ifelse(adjusted_p_chosen_Factor < 0.0001, "****",
+                                    ifelse(adjusted_p_chosen_Factor < 0.001, "***",
+                                           ifelse(adjusted_p_chosen_Factor < 0.01, "**",
+                                                  ifelse(adjusted_p_chosen_Factor < 0.05, "*", "ns"))))
+  
+  # Scatterplot for AGE vs ATF5
+  rho_ATF5 <- cor.test(boxplot_data$AGE, boxplot_data$ATF5, method = "spearman")
+  adjusted_p_ATF5 <- p.adjust(rho_ATF5$p.value, method = "BH")
+  
+  asterisks_ATF5 <- ifelse(adjusted_p_ATF5 < 0.0001, "****",
+                            ifelse(adjusted_p_ATF5 < 0.001, "***",
+                                   ifelse(adjusted_p_ATF5 < 0.01, "**",
+                                          ifelse(adjusted_p_ATF5 < 0.05, "*", "ns"))))
+  
+  # Add results to results dataframe
+  results_df <- rbind(results_df, data.frame(Tissue = tissue,
+                                             Comparison = "chosen_Factor",
+                                             Spearman_Rho = rho_chosen_Factor$estimate,
+                                             P_Value = adjusted_p_chosen_Factor,
+                                             Asterisks = asterisks_chosen_Factor))
+  
+  results_df <- rbind(results_df, data.frame(Tissue = tissue,
+                                             Comparison = "ATF5",
+                                             Spearman_Rho = rho_ATF5$estimate,
+                                             P_Value = adjusted_p_ATF5,
+                                             Asterisks = asterisks_ATF5))
+  
+  # Generate scatterplots
+  p1 <- ggplot(boxplot_data, aes(x = AGE, y = chosen_Factor)) +
+    geom_point(color = "gray") +
+    geom_smooth(method = "lm", color = "red", se = TRUE) +
+    annotate("text", x = Inf, y = Inf, label = paste0("rho: ", round(rho_chosen_Factor$estimate, 3),
+                                                      "\nP: ", asterisks_chosen_Factor),
+             hjust = 1.1, vjust = 2, size = 5) +
+    ggtitle(paste("AGE vs ", chosen_Factor, "in", tissue)) +
+    theme_minimal()
+  
+  p2 <- ggplot(boxplot_data, aes(x = AGE, y = ATF5)) +
+    geom_point(color = "violet") +
+    geom_smooth(method = "lm", color = "red", se = TRUE) +
+    annotate("text", x = Inf, y = Inf, label = paste0("rho: ", round(rho_ATF5$estimate, 3),
+                                                      "\nP: ", asterisks_ATF5),
+             hjust = 1.1, vjust = 2, size = 5) +
+    ggtitle(paste("AGE vs ATF5 in", tissue)) +
+    theme_minimal()
+  
+  print(p1)
+  print(p2)
+  
+  
+  ggsave(filename = paste0(folder_path, "/", last_component, "_AGEvs", chosen_Factor, "_Scatterplot.png"), plot = p1, width = 10, height = 8, dpi = 300)
+  ggsave(filename = paste0(folder_path, "/", last_component, "_AGEvsATF5_Scatterplot.png"), plot = p2, width = 10, height = 8, dpi = 300)
+  
+  
+  
+  folder_path_colorcodeDTHPLCE <- paste0(folder_path, "/DTHPLCE_colorcode") 
+  
+  
+  # Check if the folder exists
+  if (!dir.exists(folder_path_colorcodeDTHPLCE)) {
+    # If it doesn't exist, create the folder
+    dir.create(folder_path_colorcodeDTHPLCE, recursive = TRUE)
+    cat("Folder created at:", folder_path_colorcodeDTHPLCE, "\n")
+  } else {
+    cat("Folder already exists at:", folder_path_colorcodeDTHPLCE, "\n")
+  }
+  
+  
+  
+  
+  # Scatterplot with color coding, Spearman rho, and p-value asterisks
+  plot_with_spearman_and_dthplce <- function(data, x_var, y_var, rho_test, title) {
+    ggplot(data, aes_string(x = x_var, y = y_var)) +
+      geom_point(aes(color = DTHPLCE), alpha = 0.6, size = 3) +  # Adjust transparency with alpha
+      scale_color_manual(values = c("Hospital inpatient" = "orange", 
+                                    "Emergency room" = "maroon",
+                                    "Other" = "gray")) +
+      geom_smooth(method = "lm", color = "red", se = TRUE) +  # Add red linear regression line with SEM
+      annotate("text", x = Inf, y = Inf, label = paste0("rho: ", round(rho_test$estimate, 3),
+                                                        "\nP: ", rho_test$asterisks),
+               hjust = 1.1, vjust = 2, size = 5) +  # Spearman rho and p-value asterisks
+      ggtitle(title) +
+      theme_minimal()
+  }
+  
+  # Recode DTHPLCE column to categorize other values as "Other"
+  boxplot_data <- boxplot_data %>%
+    mutate(DTHPLCE = ifelse(DTHPLCE %in% c("Hospital inpatient", "Emergency room"), DTHPLCE, "Other"))
+  
+  # Spearman tests for chosen_Factor and ATF5
+  rho_chosen_Factor <- cor.test(boxplot_data$AGE, boxplot_data$chosen_Factor, method = "spearman")
+  adjusted_p_chosen_Factor <- p.adjust(rho_chosen_Factor$p.value, method = "BH")
+  rho_chosen_Factor$asterisks <- ifelse(adjusted_p_chosen_Factor < 0.0001, "****",
+                                        ifelse(adjusted_p_chosen_Factor < 0.001, "***",
+                                               ifelse(adjusted_p_chosen_Factor < 0.01, "**",
+                                                      ifelse(adjusted_p_chosen_Factor < 0.05, "*", "ns"))))
+  
+  rho_ATF5 <- cor.test(boxplot_data$AGE, boxplot_data$ATF5, method = "spearman")
+  adjusted_p_ATF5 <- p.adjust(rho_ATF5$p.value, method = "BH")
+  rho_ATF5$asterisks <- ifelse(adjusted_p_ATF5 < 0.0001, "****",
+                                ifelse(adjusted_p_ATF5 < 0.001, "***",
+                                       ifelse(adjusted_p_ATF5 < 0.01, "**",
+                                              ifelse(adjusted_p_ATF5 < 0.05, "*", "ns"))))
+  
+  # Generate scatterplots
+  p1_dthplce <- plot_with_spearman_and_dthplce(
+    boxplot_data,
+    "AGE",
+    "chosen_Factor",  # Use the column name as a string
+    rho_chosen_Factor,
+    paste0(last_component, "AGE vs ", chosen_Factor, " (color by DTHPLCE)")
+  )
+  
+  p2_dthplce <- plot_with_spearman_and_dthplce(
+    boxplot_data,
+    "AGE",
+    "ATF5",
+    rho_ATF5,
+    paste(last_component, "AGE vs ATF5 (color by DTHPLCE)")
+  )
+  
+  # print(p1_dthplce)
+  # print(p2_dthplce)
+  
+  
+  
+  ggsave(filename = paste0(folder_path_colorcodeDTHPLCE, "/", last_component, "_AGEvs", chosen_Factor, "_Scatterplot_DTHPLCE.png"), plot = p1_dthplce, width = 10, height = 8, dpi = 300)
+  ggsave(filename = paste0(folder_path_colorcodeDTHPLCE, "/", last_component, "_AGEvsATF5_Scatterplot_DTHPLCE.png"), plot = p2_dthplce, width = 10, height = 8, dpi = 300)
+  
+  
+}
+
+# Final plot for Spearman rho
+# One plot for chosen_Factor and one for ATF5
+results_chosen_Factor <- results_df[results_df$Comparison == "chosen_Factor", ]
+results_ATF5 <- results_df[results_df$Comparison == "ATF5", ]
+
+p_final_chosen_Factor <- ggplot(results_chosen_Factor, aes(x = Spearman_Rho, y = reorder(Tissue, Spearman_Rho))) +
+  geom_point() +
+  ggtitle("Spearman Rho for AGE vs", chosen_Factor) +
+  theme_minimal()
+
+p_final_ATF5 <- ggplot(results_ATF5, aes(x = Spearman_Rho, y = reorder(Tissue, Spearman_Rho))) +
+  geom_point() +
+  ggtitle("Spearman Rho for AGE vs ATF5") +
+  theme_minimal()
+
+# print(p_final_chosen_Factor)
+# print(p_final_ATF5)
+
+ggsave(filename = paste0(folder_path, "/SpearmanR_AGEvs", chosen_Factor, ".png"), plot = p_final_chosen_Factor, width = 10, height = 8, dpi = 300)
+ggsave(filename = paste0(folder_path, "/SpearmanR_AGEvsATF5.png"), plot = p_final_ATF5, width = 10, height = 8, dpi = 300)
+
+
+
+# Plot 1: Significant Spearman Rhos in red
+plot_significant_rhos <- function(data, comparison) {
+  ggplot(data, aes(x = Spearman_Rho, y = reorder(Tissue, Spearman_Rho), color = P_Value < 0.05)) +
+    geom_point(size = 3) +
+    scale_color_manual(values = c("FALSE" = "black", "TRUE" = "red")) +
+    ggtitle(paste("Spearman Rho for AGE vs", comparison, "- Significant in Red")) +
+    theme_minimal()
+}
+
+# chosen_Factor
+p_significant_chosen_Factor <- plot_significant_rhos(results_chosen_Factor, chosen_Factor)
+# ATF5
+p_significant_ATF5 <- plot_significant_rhos(results_ATF5, "ATF5")
+
+# print(p_significant_chosen_Factor)
+# print(p_significant_ATF5)
+
+# Plot 2: Asterisks next to datapoints for significant rhos
+plot_with_asterisks <- function(data, comparison) {
+  ggplot(data, aes(x = Spearman_Rho, y = reorder(Tissue, Spearman_Rho))) +
+    geom_point(size = 3) +
+    geom_text(aes(label = Asterisks), vjust = -1, size = 5) +
+    ggtitle(paste("Spearman Rho for AGE vs", comparison, "- Asterisks")) +
+    theme_minimal()
+}
+
+# chosen_Factor with Asterisks
+p_asterisks_chosen_Factor <- plot_with_asterisks(results_chosen_Factor, chosen_Factor)
+# ATF5 with Asterisks
+p_asterisks_ATF5 <- plot_with_asterisks(results_ATF5, "ATF5")
+
+# print(p_asterisks_chosen_Factor)
+# print(p_asterisks_ATF5)
+
+# Plot 3: Combined Spearman Rho plot for chosen_Factor and ATF5
+combined_data <- merge(results_chosen_Factor, results_ATF5, by = "Tissue", suffixes = c(chosen_Factor, "_ATF5"))
+
+colnames(combined_data)[3] <- "Spearman_Rho_chosen_Factor"
+
+p_combined <- ggplot(combined_data) +
+  geom_point(aes(x = Spearman_Rho_ATF5, y = reorder(Tissue, Spearman_Rho_ATF5)), color = "pink", size = 3) +
+  geom_point(aes(x = Spearman_Rho_chosen_Factor, y = reorder(Tissue, Spearman_Rho_ATF5)), color = "gray", size = 3) +
+  ggtitle(paste("Combined Spearman Rho for AGE vs ATF5 (pink) and", chosen_Factor, "(gray)")) +
+  theme_minimal()
+
+print(p_combined)
+
+# Plot 4: Combined Spearman Rho plot for chosen_Factor and ATF5
+combined_data <- merge(results_chosen_Factor, results_ATF5, by = "Tissue", suffixes = c(chosen_Factor, "_ATF5"))
+
+colnames(combined_data)[3] <- "Spearman_Rho_chosen_Factor"
+
+p_combined2 <- ggplot(combined_data) +
+  geom_point(aes(x = Spearman_Rho_ATF5, y = reorder(Tissue, Spearman_Rho_chosen_Factor)), color = "pink", size = 3) +
+  geom_point(aes(x = Spearman_Rho_chosen_Factor, y = reorder(Tissue, Spearman_Rho_chosen_Factor)), color = "gray", size = 3) +
+  ggtitle(paste("Combined Spearman Rho for AGE vs ATF5 (pink) and", chosen_Factor, "(gray)")) +
+  theme_minimal()
+
+print(p_combined2)
+
+
+ggsave(filename = paste0(folder_path, "/SpearmanR_p_significant_", chosen_Factor, ".png"), plot = p_significant_chosen_Factor, width = 10, height = 8, dpi = 300)
+ggsave(filename = paste0(folder_path, "/SpearmanR_p_significant_ATF5.png"), plot = p_significant_ATF5, width = 10, height = 8, dpi = 300)
+ggsave(filename = paste0(folder_path, "/SpearmanR_p_asterisks_", chosen_Factor, ".png"), plot = p_asterisks_chosen_Factor, width = 10, height = 8, dpi = 300)
+ggsave(filename = paste0(folder_path, "/SpearmanR_p_asterisks_ATF5.png"), plot = p_asterisks_ATF5, width = 10, height = 8, dpi = 300)
+ggsave(filename = paste0(folder_path, "/SpearmanR_p_combined.png"), plot = p_combined, width = 10, height = 8, dpi = 300)
+ggsave(filename = paste0(folder_path, "/SpearmanR_p_combined_factorOrder.png"), plot = p_combined2, width = 10, height = 8, dpi = 300)
+
+write.csv(combined_data, paste0(folder_path, "/", chosen_Factor, "_vs_AGE_SpearmanRhos.csv"))
+ 

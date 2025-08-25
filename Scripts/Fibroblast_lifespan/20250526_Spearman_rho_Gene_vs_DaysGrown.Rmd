@@ -1,0 +1,1463 @@
+---
+title: "Factor Analysis"
+output: html_document
+date: "2025-08-13"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+
+# Generating data_sub, exprs, manifest, and Total_List which does not include GDF15, but is in genes_of_interest_plus_gdf15
+```{r merge}
+
+rm(list = ls())
+
+library(here)
+library(plotly)
+library(tools)  # <-- needed for file_path_sans_ext()
+
+Plot_Save <- "ON"
+
+
+script_path <- here("Scripts", "Fibroblast_lifespan", "Intro1_FB_Lifespan_exprs_manifest_ISR_list.R")
+source(script_path)
+
+script_path2 <- here("Scripts","Fibroblast_lifespan", "GO_vs_AnyGenes_vs_JacksonLabs_ListsofGenes.R")
+source(script_path2)
+
+#------------------------------------------------------ NAMING FOLDER AFTER THE NAME OF THE SCRIPT
+# Helper to get the *current script* path (works in RStudio, Rscript, or knitr)
+get_script_path <- function() {
+  # RStudio
+  if (requireNamespace("rstudioapi", quietly = TRUE) &&
+      rstudioapi::isAvailable()) {
+    p <- tryCatch(rstudioapi::getActiveDocumentContext()$path, error = function(e) "")
+    if (nzchar(p)) return(normalizePath(p, winslash = "/", mustWork = FALSE))
+  }
+  # knitr / Quarto
+  if (requireNamespace("knitr", quietly = TRUE)) {
+    p <- tryCatch(knitr::current_input(), error = function(e) "")
+    if (nzchar(p)) return(normalizePath(p, winslash = "/", mustWork = FALSE))
+  }
+  # Rscript
+  args <- commandArgs(trailingOnly = FALSE)
+  file_arg <- grep("^--file=", args, value = TRUE)
+  if (length(file_arg) == 1) {
+    p <- sub("^--file=", "", file_arg)
+    return(normalizePath(p, winslash = "/", mustWork = FALSE))
+  }
+  # Fallback: unknown
+  ""
+}
+
+# ---- 1) Use script name as Folder_name (fallback to date if unknown) ----
+script_path <- get_script_path()
+Folder_name <- if (nzchar(script_path)) {
+  file_path_sans_ext(basename(script_path))
+} else {
+  format(Sys.Date(), "%Y_%m_%d")
+}
+
+
+
+#------------------------------------------------------
+sub_foldername <- "Spearman_Rhos_Age_vs_Genes"
+boplot_folder <- "FA_All_Factors_BoxPlots"
+GDF15_folder <- "FA_All_Factors_vs_GDF15"
+cor_folder <- "correlation_plots"
+
+folder_path <- here("Results", "Fibroblast_lifespan", "Factor_Analysis", Folder_name)
+
+
+# Check if the folder exists
+if (!dir.exists(folder_path)) {
+  # If it doesn't exist, create the folder
+  dir.create(folder_path, recursive = TRUE)
+  cat("Folder created at:", folder_path, "\n")
+} else {
+  cat("Folder already exists at:", folder_path, "\n")
+}
+
+subfolder_path <- paste0(folder_path, "/", sub_foldername)
+
+# Check if the folder exists
+if (!dir.exists(subfolder_path)) {
+  # If it doesn't exist, create the folder
+  dir.create(subfolder_path, recursive = TRUE)
+  cat("Folder created at:", subfolder_path, "\n")
+} else {
+  cat("Folder already exists at:", subfolder_path, "\n")
+}
+
+folder_path <- paste0(subfolder_path, "/", boplot_folder)
+
+# Check if the folder exists
+if (!dir.exists(folder_path)) {
+  # If it doesn't exist, create the folder
+  dir.create(folder_path, recursive = TRUE)
+  cat("Folder created at:", folder_path, "\n")
+} else {
+  cat("Folder already exists at:", folder_path, "\n")
+}
+
+folder_path <- paste0(subfolder_path, "/", GDF15_folder)
+
+# Check if the folder exists
+if (!dir.exists(folder_path)) {
+  # If it doesn't exist, create the folder
+  dir.create(folder_path, recursive = TRUE)
+  cat("Folder created at:", folder_path, "\n")
+} else {
+  cat("Folder already exists at:", folder_path, "\n")
+}
+
+folder_path <- paste0(subfolder_path, "/", cor_folder)
+
+# Check if the folder exists
+if (!dir.exists(folder_path)) {
+  # If it doesn't exist, create the folder
+  dir.create(folder_path, recursive = TRUE)
+  cat("Folder created at:", folder_path, "\n")
+} else {
+  cat("Folder already exists at:", folder_path, "\n")
+}
+
+```
+
+#Defining datasets -  currently choosing all data, except for the technical replicates. 
+## Choose Which geneset to use!
+``` {r}
+
+#Individual Gene lists
+##########################################################################
+
+# genes_of_interest <- only_GO_plus_gdf15
+# genes_of_interest <- only_AnyGenes_plus_gdf15
+# genes_of_interest <- only_JacksonLabs_plus_gdf15
+##########################################################################
+
+
+#All Gene lists combined
+##########################################################################
+genes_of_interest <- genes_of_interest_plus_gdf15
+##########################################################################
+
+
+data_sub <- data_sub %>%
+  mutate(intx = paste(Group, Experiment, sep = "_"))
+
+datasets <- process_datasets(data_sub, genes_of_interest)
+WT_SURF1_all_Txs <- datasets$WT_SURF1_all_Txs # Access the WT_SURF1_all_Txs dataset
+
+lifespan_sample_choice <- WT_SURF1_all_Txs
+lifespan_sample_choice_str <- "All_samples_339"
+
+
+##########################################################################
+# #If we wanted to include the technical replicates and have the 345 samples
+#  All_data_including_tech_reps <- data_sub %>%
+#    select(SampleID, Experiment, Group, any_of(genes_of_interest))
+##########################################################################
+```
+
+# Factor Analysis
+## using SCALED data!!!!
+```{r}
+
+Plot_Save <- "ON"
+
+remove(Total_List)
+
+# Install psych package if not already installed
+if (!require(psych)) install.packages("psych", dependencies=TRUE)
+
+
+# Remove Genes that are NOT in out Fibroblast Lifespan Dataset
+valid_genes <- genes_of_interest[genes_of_interest %in% colnames(lifespan_sample_choice)] # Check if the genes are in the dataframe's columns
+subset_df <- lifespan_sample_choice[, valid_genes] # Subset the dataframe only with valid genes
+data <- subset_df
+
+mydata <- data
+
+
+any_na <- sapply(mydata, function(x) any(is.na(x) | is.infinite(x)))
+print(names(mydata)[any_na])
+near_zero_var_cols <- sapply(mydata, function(x) var(x, na.rm = TRUE) < .Machine$double.eps)
+print(names(mydata)[near_zero_var_cols])
+
+data_scaled <- scale(mydata)
+
+mean_x <- attr(data_scaled, "scaled:center") # Get the means of the original variables
+sd_x <- attr(data_scaled, "scaled:scale")   # Get the standard deviations of the original variables
+
+# Create the "Data/Processed" folder if it doesn't exist
+processed_path <- here("Data", "Fibroblast_lifespan", "Processed")
+if (!dir.exists(processed_path)) dir.create(processed_path, recursive = TRUE)
+
+# Save mean_x
+write.csv(mean_x,
+          file = file.path(processed_path, paste0(Folder_name, "_meanx_for_scaling.csv")),
+          row.names = TRUE)
+
+# Save sd_x
+write.csv(sd_x,
+          file = file.path(processed_path, paste0(Folder_name, "_sdx_for_scaling.csv")),
+          row.names = TRUE)
+
+mydata <- data_scaled
+
+ev <- eigen(cor(data_scaled)) # get eigenvalues
+ev$values
+
+# file_path <- paste0(path, "/3_Outputs/Factor_Analysis/", Folder_name, "/",  sub_foldername)
+file_path <- subfolder_path
+
+ # Save Scree Plot
+  if (Plot_Save == "ON") {
+pdf(file.path(file_path, "scree_plot.pdf"))}
+scree(mydata, pc=FALSE)  # Scree plot for factor analysis
+dev.off()
+
+# Save Parallel Analysis Scree Plots
+  if (Plot_Save == "ON") {
+pdf(file.path(file_path, "parallel_analysis_scree.pdf"))}
+fa.parallel(mydata, fa="fa")  # Parallel analysis scree plots
+get_NFacs <- fa.parallel(mydata, fa="fa")  # Parallel analysis scree plots
+Nfacs <- get_NFacs$ nfact
+dev.off()
+ 
+fit <- factanal(mydata, Nfacs, rotation="varimax", scores="regression")
+#fit <- fa(data_scaled, nfactors=Nfacs, rotate="varimax", scores="regression")
+fit # print results
+
+fa_loadings <- fit$loadings
+# view(fa_loadings)
+# 
+# scaled_data <- data_scaled
+# fit <- factanal(scaled_data, factors = Nfacs, rotation = "varimax", scores = "regression") # varimax is the default
+# 
+# loadings <- fit$loadings
+# view(loadings)
+
+correlations <- fit$correlation
+
+write.csv(correlations,
+          file = file.path(processed_path, paste0(Folder_name, "_correlations_for_scaling.csv")),
+          row.names = TRUE)
+
+
+# 
+# t(loadings) %*% solve(correlations)
+# W <- t(loadings) %*% solve(correlations)
+# scores <- fit$score
+# 
+# Wminus <- t(W)
+# final <- scaled_data %*% Wminus
+
+
+
+# ---- 2) Build output directory under Results/.../Factor_Analysis/<Folder_name> ----
+out_dir <- here("Results", "Fibroblast_lifespan", "Factor_Analysis", Folder_name)
+
+# ---- 3) Ensure folders exist ----
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# --- 4) Save Factor Analysis Diagram PDF ---
+loads <- fit$loadings  # your loadings object
+
+if (identical(Plot_Save, "ON")) {
+  pdf_path <- file.path(out_dir, sprintf("/factor_analysis_diagram_%s_factors.pdf", Nfacs))
+  pdf(pdf_path, width = 12, height = 40)
+  on.exit(dev.off(), add = TRUE)  # ensures file closes even if error
+}
+
+fa.diagram(loads)
+
+
+num_loadings <- nrow(fa_loadings)
+# Save the factor loadings to a CSV file
+FactorLoadings <- round(fit$loadings[1:num_loadings,], 3)
+
+write.csv(FactorLoadings,
+          file = file.path(processed_path, paste0(Folder_name, "_FacLoads_", Nfacs, "_factors.csv")),
+          row.names = TRUE)
+
+################################################################################################################
+# Define a threshold for significant loadings
+loading_threshold <- 0.47
+################################################################################################################
+
+# Extract loadings for the first factor
+first_factor_loadings <- loads[, 1, drop = FALSE] # Extract loadings for the first factor
+significant_genes <- rownames(first_factor_loadings)[abs(first_factor_loadings[, 1]) >= loading_threshold] # Filter genes with loadings above the threshold
+filtered_first_factor_loadings <- first_factor_loadings[significant_genes, , drop = FALSE] # Subset the loadings to include only significant genes
+  if (Plot_Save == "ON") {
+pdf(file.path(file_path, paste0("factor_analysis_first_factor_", Nfacs, "_factors_significant_genes.pdf")))} # Save Factor Analysis Diagram for the First Factor with significant genes only
+fa.diagram(filtered_first_factor_loadings)  # Plot the factor analysis diagram for significant genes only
+dev.off()
+
+################################################################################################################
+Plot_Save <- "ON"
+################################################################################################################
+pheatmap_default_colors <- colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(100)
+for (i in 1:Nfacs) {
+  factor_column_name <- paste0("Factor", i)
+
+  chosen_columns <- FactorLoadings[, factor_column_name, drop = FALSE]   # Extract the current factor's loadings
+  ordered_df <- data.frame(variable = rownames(FactorLoadings),    # Convert to a dataframe and add variable names
+                           loading = chosen_columns[, 1])
+  ordered_df <- ordered_df[order(ordered_df$loading), ]   # Sort the dataframe by descending order of the current factor's loadings
+  ordered_df$variable <- factor(ordered_df$variable, levels = ordered_df$variable)   # Update the factor levels to match the order in the dataframe
+  
+  # Plot
+  p <- ggplot(ordered_df, aes(x = variable, y = loading, fill = loading)) +
+    geom_col() +
+    coord_flip() +
+    labs(title = paste("Factor", i, "Loadings"),
+         x = "Variable",
+         y = "Loading") +
+    scale_fill_gradientn(colors = pheatmap_default_colors) +  # Apply the same color palette
+    theme_minimal()
+  
+  print(p)
+  
+  if (Plot_Save == "ON") {
+    
+    # Generate a dynamic file name
+    file_name <- file.path(file_path, paste0("Factor_", i, ".png"))
+    ggsave(file_name, plot = p, width = 14, height = 14, dpi = 300)
+  
+  }
+}
+
+# -------------------------------------------     Uncomment out if you which to save this ---------------
+# Save the heatmap as a PNG
+png(paste0(file_path, "Heatmap_FA_n_factors_", Nfacs, ".png"), width = 10, height = 15, units = 'in', res = 300)
+pheatmap(FactorLoadings,
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         show_colnames = TRUE)
+dev.off()
+# -------------------------------------------     Uncomment out if you which to save this ---------------
+
+
+factor_scores <- fit$scores
+write.csv(factor_scores,
+          file = file.path(processed_path, paste0(Folder_name, "_factor_scores.csv")),
+          row.names = TRUE)
+
+```
+
+
+
+
+# Datasets similar to the PCA markdown includes intx
+``` {r} 
+  
+  WT_SURF1_all_Txs = data_sub %>%
+    select(SampleID, Experiment, Group, DaysGrown, intx, any_of(genes_of_interest)) %>%
+    filter(Group %in% c("Control", "SURF1")) %>%
+  filter(intx != "SURF1_NA")
+  
+
+
+```
+
+# Correlation Factor analysis score vs GDF15
+```{r}
+
+Plot_Save <- "ON"
+chosen_Factor <- "Factor1"
+
+library(psych)
+
+
+fa_result <- factanal(mydata, Nfacs, rotation="varimax", scores="regression")
+# fa_result <- fa(data_scaled, nfactors=Nfacs, rotate="varimax", scores="regression")
+fa_result # print results
+fa_scores <- fa_result$scores[, chosen_Factor]
+fa_loadings <- fa_result$loadings
+# view(fa_loadings)
+
+chosen_dataset <- WT_SURF1_all_Txs
+plot_title <- "WT_SURF1_all_Txs"
+
+
+# Get column names
+column_names <- colnames(fa_result$scores)
+
+# Initialize a dataframe to store results
+spearman_results <- data.frame(
+  Factor = character(),
+  Spearman_Rho = numeric(),
+  Spearman_P = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop through columns that start with "Factor"
+for (col in column_names) {
+  if (startsWith(col, "Factor")) {
+    # Perform desired operations
+    print(paste("Processing column:", col))
+chosen_Factor <- col
+    
+color_palette <- c(
+  "Control_No_Tx" = "gray",
+  "Control_DEX" = "lightcoral",
+  "SURF1_No_Tx" = "purple",
+  "SURF1_DEX" = "maroon",
+  "Control_Oligo" = "violet",
+  "Control_mitoNUITs" = "orange",
+  "Control_DEX_mitoNUITs" = "lightpink",
+  "Control_DEX_Oligo" = "blue",
+  "Control_ox3" = "lightgreen",
+  "Control_Contact_Inhibition" = "green",
+  "Control_Contact_Inhibition_ox3" = "darkgreen",
+  "Control_Galactose" = "lightblue",
+  "Control_betahydroxybutyrate" = "skyblue",
+  "Control_2DG" = "yellow"
+)
+
+
+ # IF WE WANT TO VIEW THE SCORES: 
+# --------------------------------  
+# View(Factor_results[["rotation"]])  # To open rotation in an interactive viewer
+# View(Factor_results[["scale"]]) # # To open scale in an interactive viewer
+# View(Factor_results[["x"]]) # # To open x in an interactive viewer
+
+Factor_results_scores <- (fa_result[["scores"]])
+
+## If we want to save the scores and rotation and scale
+#-------------------------------------------------------
+# write.csv(Factor_results[["rotation"]], paste0(path, "/3_Outputs/Factor/rotation.csv")) # Write rotation to a CSV file
+# write.csv(Factor_results[["scale"]], paste0(path, "/3_Outputs/Factor/scale.csv")) # Write scale to a CSV file
+# write.csv(Factor_results[["x"]], paste0(path, "/3_Outputs/Factor/score.csv")) # Write x to a CSV file
+
+  # Multiply the Factor2 loadings by -1
+# Factor_results$rotation[, "Factor2"] <- Factor_results$rotation[, "Factor2"] * -1
+# Factor_results$x[, "Factor2"] <- Factor_results$x[, "Factor2"] * -1
+
+  
+# Here we scale GDF15 alone in the all samples dataset, and compare it against fa scores  
+#--------------------------------------------------------------------------------------------
+genes_of_interest <- "GDF15"
+
+WT_SURF1_all_Txs_GDF15 = data_sub %>%
+    select(SampleID, Experiment, Group, DaysGrown, intx, any_of(genes_of_interest)) %>%
+    filter(Group %in% c("Control", "SURF1")) 
+
+
+# Standardize the GDF15 column and add it back to the data frame
+WT_SURF1_all_Txs_GDF15$GDF15_scaled <- scale(WT_SURF1_all_Txs_GDF15$GDF15) # this centers and scales
+
+# WT_SURF1_all_Txs_GDF15$GDF15_centered <- scale(WT_SURF1_all_Txs_GDF15$GDF15, scale = F)[,1] # this only centers, does not z score transform
+
+# Assuming 'Factor_results' is your Factor object and 'x' contains the Factor scores
+fa_scores <- fa_result$scores[, chosen_Factor]  # Extract the scores for the first principal component
+WT_SURF1_all_Txs_GDF15$fa_Scores <- fa_scores
+
+
+# DO WE WANT A LINEAR REGRESSION OR A CORRELATION????????????????????????????????????????????????????????????????????????
+#------------------------------------------------------------------------------------------------------------------------
+
+
+
+# Perform a linear model to get coefficients and p-value
+mdl <- lm(fa_Scores ~ GDF15_scaled + Group + DaysGrown, data = WT_SURF1_all_Txs_GDF15)
+hist(resid(mdl))
+summary(mdl)
+summary_fit <- summary(mdl)
+residuals <- resid(mdl)
+shapiro_test <- shapiro.test(residuals)
+print(shapiro_test)
+
+slope <- summary_fit$coefficients[2, 1]
+p_value <- summary_fit$coefficients[2, 4]
+r_squared <- summary_fit$r.squared
+
+# Create the plot
+plot <- ggplot(WT_SURF1_all_Txs_GDF15, aes(x = GDF15_scaled, y = fa_Scores, color = intx)) +
+    geom_point(alpha = 0.5, size = 5) +
+    geom_smooth(method = "lm", color = "red") +
+    scale_color_manual(values = color_palette) +
+    labs(x = "Standardized GDF15 Expression", y = chosen_Factor, title = paste("Correlation between GDF15 and FA score:", chosen_Factor)) +
+    theme_minimal() +
+      theme(
+        axis.text.x = element_text(size = 24),  # Increase x-axis numbers size
+        axis.text.y = element_text(size = 24)   # Increase y-axis numbers size
+    ) +
+    geom_text(aes(label = paste("Slope:", round(slope, 3), "p-value:", signif(p_value, 3), "R-squared:", round(r_squared, 3))),
+              x = Inf, y = Inf, hjust = 1.1, vjust = 1.1, size = 3.5, color = "black")
+
+# Print the plot
+print(plot)
+
+     #   Generate a dynamic file name
+  file_name <- paste0(file_path, paste0("/FA_All_Factors_vs_GDF15/lnRegMdl_plusGroup_plusDaysGrown", chosen_Factor, "scoresvsGDF15.png"))
+  
+  if (Plot_Save == "ON") {
+        ggsave(file_name, plot = plot, width = 14, height = 10, dpi = 300)
+    
+  }
+
+
+
+
+
+# Calculate Spearman's correlation
+spearman_test <- cor.test(WT_SURF1_all_Txs_GDF15$GDF15_scaled, WT_SURF1_all_Txs_GDF15$fa_Scores, method = "spearman")
+spearman_rho <- spearman_test$estimate  # Spearman's rho
+spearman_p <- spearman_test$p.value     # p-value
+
+# Append results to the dataframe
+    spearman_results <- rbind(
+      spearman_results,
+      data.frame(Factor = chosen_Factor, Spearman_Rho = spearman_rho, Spearman_P = spearman_p)
+    )
+
+
+
+# Format p-value for display
+if (spearman_p < 0.0001) {
+    p_value_text <- "p < 0.0001"
+} else {
+    p_value_text <- paste("p-value:", signif(spearman_p, 3))
+}
+
+# Create the plot with Spearman's rho and formatted p-value
+plot <- ggplot(WT_SURF1_all_Txs_GDF15, aes(x = GDF15_scaled, y = fa_Scores, color = intx)) +
+    geom_point(alpha = 0.5, size = 5) +
+    geom_smooth(method = "lm", color = "red") +  # Linear model for visual trend
+    scale_color_manual(values = color_palette) +
+    labs(x = "Standardized GDF15 Expression", y = paste( chosen_Factor, " Scores"), title = paste("GDF15 and", chosen_Factor, " Score", " Spearman's rho:", round(spearman_rho, 3), p_value_text)) +
+    theme_minimal() +
+        theme(
+        axis.text.x = element_text(size = 24),  # Increase x-axis numbers size
+        axis.text.y = element_text(size = 24)   # Increase y-axis numbers size
+    ) +
+    geom_text(aes(label = ""), 
+              x = Inf, y = Inf, hjust = 1.1, vjust = 1.1, size = 8, color = "black") +  # Adjust text size here
+    theme(
+        axis.title = element_text(size = 14),  # Adjust axis title size
+        axis.text = element_text(size = 14),   # Adjust axis text size
+        plot.title = element_text(size = 16, face = "bold")  # Adjust title size
+    )
+
+# Print the plot
+print(plot)
+
+
+FA_Index_Scores <- WT_SURF1_all_Txs_GDF15 %>%
+  select(SampleID, Group, intx, fa_Scores)
+
+     #   Generate a dynamic file name
+  file_name <- paste0(file_path, paste0("/FA_All_Factors_vs_GDF15/", chosen_Factor, "scoresvsGDF15_biggerdots.png"))
+
+  if (Plot_Save == "ON") {
+        ggsave(file_name, plot = plot, width = 14, height = 10, dpi = 300)
+    
+    write.csv(FA_Index_Scores, paste0(file_path, "/", chosen_Factor, "_ISR_Scores_per_Sample.csv"))
+    
+      write.csv(WT_SURF1_all_Txs_GDF15, paste0(file_path, "/", chosen_Factor, "GDF15_expression.csv"))
+  }
+
+  }
+}
+  if (Plot_Save == "ON") {
+# Write the final results to a CSV file
+write.csv(spearman_results, file = paste0(file_path, "/Spearman_Rho_and_P_Values.csv"), row.names = FALSE)}
+
+ 
+```  
+
+
+
+
+
+
+# Correlation FA score vs FA scores
+```{r}
+
+Plot_Save <- "ON"
+chosen_Factor <- "Factor1"
+
+library(psych)
+
+fa_result <- factanal(mydata, Nfacs, rotation="varimax", scores="regression")
+
+# We assume "chosen_dataset" has columns like SampleID, Group, intx, etc.
+chosen_dataset <- WT_SURF1_all_Txs
+plot_title <- "WT_SURF1_all_Txs"
+
+
+# Define a color palette (optional)
+color_palette <- c(
+  "Control_No_Tx" = "gray",
+  "Control_DEX" = "lightcoral",
+  "SURF1_No_Tx" = "purple",
+  "SURF1_DEX" = "maroon",
+  "Control_Oligo" = "violet",
+  "Control_mitoNUITs" = "orange",
+  "Control_DEX_mitoNUITs" = "lightpink",
+  "Control_DEX_Oligo" = "blue",
+  "Control_ox3" = "lightgreen",
+  "Control_Contact_Inhibition" = "green",
+  "Control_Contact_Inhibition_ox3" = "darkgreen",
+  "Control_Galactose" = "lightblue",
+  "Control_betahydroxybutyrate" = "skyblue",
+  "Control_2DG" = "yellow"
+)
+
+# -----------------------------------------------------------
+# 1) Extract factor-score columns and combine with metadata
+# -----------------------------------------------------------
+# Factor scores from your factor-analysis result
+fa_scores_df <- as.data.frame(fa_result$scores)
+
+# Optionally, add metadata columns from your chosen dataset (if you want them for plotting)
+# Make sure that the rows are aligned (e.g., same order or same row count).
+fa_scores_df$SampleID <- chosen_dataset$SampleID
+fa_scores_df$Group    <- chosen_dataset$Group
+fa_scores_df$intx     <- chosen_dataset$intx
+
+# Identify which columns are factor scores
+column_names    <- colnames(fa_scores_df)
+factor_columns  <- column_names[startsWith(column_names, "Factor")]
+
+# ---------------------------------------
+# 2) Initialize a Spearman results table
+# ---------------------------------------
+spearman_results <- data.frame(
+  Factor1       = character(),
+  Factor2       = character(),
+  Spearman_Rho  = numeric(),
+  Spearman_P    = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# -------------------------------------------
+# 3) Loop over all unique pairs of factor cols
+# -------------------------------------------
+for (i in 1:(length(factor_columns) - 1)) {
+  for (j in (i + 1):length(factor_columns)) {
+    
+    factor_x <- factor_columns[i]
+    factor_y <- factor_columns[j]
+    
+    # -----------------------
+    # 3a) Spearman Correlation
+    # -----------------------
+    spearman_test <- cor.test(
+      fa_scores_df[[factor_x]],
+      fa_scores_df[[factor_y]],
+      method = "spearman"
+    )
+    
+    rho_val   <- spearman_test$estimate
+    p_val     <- spearman_test$p.value
+    
+    # Store in results data.frame
+    spearman_results <- rbind(
+      spearman_results,
+      data.frame(
+        Factor1      = factor_x,
+        Factor2      = factor_y,
+        Spearman_Rho = rho_val,
+        Spearman_P   = p_val,
+        stringsAsFactors = FALSE
+      )
+    )
+    
+    # -----------------------
+    # 3b) Make a scatter plot
+    # -----------------------
+    # Format the p-value for plot title
+    if (p_val < 0.0001) {
+      p_value_text <- "p < 0.0001"
+    } else {
+      p_value_text <- paste("p:", signif(p_val, 3))
+    }
+    
+    plot_subtitle <- paste0("Spearman rho=", round(rho_val, 3), ", ", p_value_text)
+    
+    plot_obj <- ggplot(fa_scores_df, aes_string(x = factor_x, y = factor_y, color = "intx")) +
+      geom_point(alpha = 0.6, size = 3) +
+      geom_smooth(method = "lm", color = "red") +  # linear fit for visual reference
+      scale_color_manual(values = color_palette) +
+      labs(
+        x = factor_x,
+        y = factor_y,
+        title = paste("Scatter plot of", factor_x, "vs", factor_y),
+        subtitle = plot_subtitle
+      ) +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        plot.title = element_text(size = 16, face = "bold"),
+        legend.position = "none" 
+      ) 
+    
+    # Print the plot to screen
+    print(plot_obj)
+    
+    # Optionally save the plot
+    if (Plot_Save == "ON") {
+      file_name <- paste0(file_path, "/FA_Factor_Scatter_", factor_x, "_vs_", factor_y, ".png")
+      ggsave(file_name, plot = plot_obj, width = 8, height = 6, dpi = 300)
+    }
+  } 
+}
+
+# -----------------------------
+# 4) Save Spearman results CSV
+# -----------------------------
+if (Plot_Save == "ON") {
+  write.csv(spearman_results,
+            file = paste0(file_path, "/Spearman_Rho_and_P_Values_FactorPairs.csv"),
+            row.names = FALSE)
+}
+
+# View final correlation results in R
+spearman_results
+ 
+```  
+
+
+
+
+# Correlation FA score vs FA scores NO RED LINE
+```{r}
+
+Plot_Save <- "ON"
+chosen_Factor <- "Factor1"
+
+library(psych)
+
+fa_result <- factanal(mydata, Nfacs, rotation="varimax", scores="regression")
+
+# We assume "chosen_dataset" has columns like SampleID, Group, intx, etc.
+chosen_dataset <- WT_SURF1_all_Txs
+plot_title <- "WT_SURF1_all_Txs"
+
+
+# Define a color palette (optional)
+color_palette <- c(
+  "Control_No_Tx" = "gray",
+  "Control_DEX" = "lightcoral",
+  "SURF1_No_Tx" = "purple",
+  "SURF1_DEX" = "maroon",
+  "Control_Oligo" = "violet",
+  "Control_mitoNUITs" = "orange",
+  "Control_DEX_mitoNUITs" = "lightpink",
+  "Control_DEX_Oligo" = "blue",
+  "Control_ox3" = "lightgreen",
+  "Control_Contact_Inhibition" = "green",
+  "Control_Contact_Inhibition_ox3" = "darkgreen",
+  "Control_Galactose" = "lightblue",
+  "Control_betahydroxybutyrate" = "skyblue",
+  "Control_2DG" = "yellow"
+)
+
+# -----------------------------------------------------------
+# 1) Extract factor-score columns and combine with metadata
+# -----------------------------------------------------------
+# Factor scores from your factor-analysis result
+fa_scores_df <- as.data.frame(fa_result$scores)
+
+# Optionally, add metadata columns from your chosen dataset (if you want them for plotting)
+# Make sure that the rows are aligned (e.g., same order or same row count).
+fa_scores_df$SampleID <- chosen_dataset$SampleID
+fa_scores_df$Group    <- chosen_dataset$Group
+fa_scores_df$intx     <- chosen_dataset$intx
+
+# Identify which columns are factor scores
+column_names    <- colnames(fa_scores_df)
+factor_columns  <- column_names[startsWith(column_names, "Factor")]
+
+# ---------------------------------------
+# 2) Initialize a Spearman results table
+# ---------------------------------------
+spearman_results <- data.frame(
+  Factor1       = character(),
+  Factor2       = character(),
+  Spearman_Rho  = numeric(),
+  Spearman_P    = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# -------------------------------------------
+# 3) Loop over all unique pairs of factor cols
+# -------------------------------------------
+for (i in 1:(length(factor_columns) - 1)) {
+  for (j in (i + 1):length(factor_columns)) {
+    
+    factor_x <- factor_columns[i]
+    factor_y <- factor_columns[j]
+    
+    # -----------------------
+    # 3a) Spearman Correlation
+    # -----------------------
+    spearman_test <- cor.test(
+      fa_scores_df[[factor_x]],
+      fa_scores_df[[factor_y]],
+      method = "spearman"
+    )
+    
+    rho_val   <- spearman_test$estimate
+    p_val     <- spearman_test$p.value
+    
+    # Store in results data.frame
+    spearman_results <- rbind(
+      spearman_results,
+      data.frame(
+        Factor1      = factor_x,
+        Factor2      = factor_y,
+        Spearman_Rho = rho_val,
+        Spearman_P   = p_val,
+        stringsAsFactors = FALSE
+      )
+    )
+    
+    # -----------------------
+    # 3b) Make a scatter plot
+    # -----------------------
+    # Format the p-value for plot title
+    if (p_val < 0.0001) {
+      p_value_text <- "p < 0.0001"
+    } else {
+      p_value_text <- paste("p:", signif(p_val, 3))
+    }
+    
+    plot_subtitle <- paste0("Spearman rho=", round(rho_val, 3), ", ", p_value_text)
+    
+    plot_obj <- ggplot(fa_scores_df, aes_string(x = factor_x, y = factor_y, color = "intx")) +
+      geom_point(alpha = 0.6, size = 3) +
+      # geom_smooth(method = "lm", color = "red") +  # linear fit for visual reference
+      scale_color_manual(values = color_palette) +
+      labs(
+        x = factor_x,
+        y = factor_y,
+        title = paste("Scatter plot of", factor_x, "vs", factor_y),
+        subtitle = plot_subtitle
+      ) +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        plot.title = element_text(size = 16, face = "bold"),
+        legend.position = "none" 
+      ) 
+    
+    # Print the plot to screen
+    print(plot_obj)
+    
+    # Optionally save the plot
+    if (Plot_Save == "ON") {
+      file_name <- paste0(file_path, "/No_Line_FA_Factor_Scatter_", factor_x, "_vs_", factor_y, ".png")
+      ggsave(file_name, plot = plot_obj, width = 8, height = 6, dpi = 300)
+    }
+  } 
+}
+
+# # -----------------------------
+# # 4) Save Spearman results CSV
+# # -----------------------------
+# if (Plot_Save == "ON") {
+#   write.csv(spearman_results,
+#             file = paste0(file_path, "/Spearman_Rho_and_P_Values_FactorPairs.csv"),
+#             row.names = FALSE)
+# }
+# 
+# # View final correlation results in R
+# spearman_results
+#  
+```  
+
+
+
+
+
+
+#Gdf15 vs age 
+``` {r}
+
+
+
+
+# Calculate Spearman's correlation
+spearman_test <- cor.test(WT_SURF1_all_Txs_GDF15$GDF15_scaled, WT_SURF1_all_Txs_GDF15$DaysGrown, method = "spearman")
+spearman_rho <- spearman_test$estimate  # Spearman's rho
+spearman_p <- spearman_test$p.value     # p-value
+
+# Format p-value for display
+if (spearman_p < 0.0001) {
+    p_value_text <- "p < 0.0001"
+} else {
+    p_value_text <- paste("p-value:", signif(spearman_p, 3))
+}
+
+# Create the plot with Spearman's rho and formatted p-value
+plot <- ggplot(WT_SURF1_all_Txs_GDF15, aes(x = DaysGrown, y = GDF15_scaled, color = intx)) +
+    geom_point(alpha = 0.5, size = 5) +
+    geom_smooth(method = "lm", color = "red") +  # Linear model for visual trend
+    scale_color_manual(values = color_palette) +
+    labs(x = "Days Grown", y = "GDF15 scaled", title = paste("GDF15 vs Days Grown", " Spearman's rho:", round(spearman_rho, 3), p_value_text)) +
+    theme_minimal() +
+        theme(
+        axis.text.x = element_text(size = 24),  # Increase x-axis numbers size
+        axis.text.y = element_text(size = 24)   # Increase y-axis numbers size
+    ) +
+    geom_text(aes(label = ""), 
+              x = Inf, y = Inf, hjust = 1.1, vjust = 1.1, size = 8, color = "black") +  # Adjust text size here
+    theme(
+        axis.title = element_text(size = 14),  # Adjust axis title size
+        axis.text = element_text(size = 14),   # Adjust axis text size
+        plot.title = element_text(size = 16, face = "bold")  # Adjust title size
+    )
+
+# Print the plot
+print(plot)
+
+     #   Generate a dynamic file name
+  file_name <- paste0(file_path, paste0("/DaysGrown_vs_GDF15.png"))
+
+  if (Plot_Save == "ON") {
+        ggsave(file_name, plot = plot, width = 14, height = 10, dpi = 300)
+    
+  }
+```
+
+
+# Correlation FA score vs AGE
+```{r}
+
+Plot_Save <- "ON"
+chosen_Factor <- "Factor1"
+
+FA_Scores <- WT_SURF1_all_Txs_GDF15 %>%
+  select(SampleID)
+
+library(psych)
+
+# data_scaled <- scale(mydata)
+fa_result <- factanal(mydata, Nfacs, rotation="varimax", scores="regression")
+# fa_result <- fa(data_scaled, nfactors=Nfacs, rotate="varimax", scores="regression")
+fa_result # print results
+fa_scores <- fa_result$scores[, chosen_Factor]
+fa_loadings <- fa_result$loadings
+# view(fa_loadings)
+
+chosen_dataset <- WT_SURF1_all_Txs
+plot_title <- "WT_SURF1_all_Txs"
+
+
+# Get column names
+column_names <- colnames(fa_result$scores)
+
+# Loop through columns that start with "Factor"
+for (col in column_names) {
+  if (startsWith(col, "Factor")) {
+    # Perform desired operations
+    print(paste("Processing column:", col))
+chosen_Factor <- col
+    
+color_palette <- c(
+  "Control_No_Tx" = "gray",
+  "Control_DEX" = "lightcoral",
+  "SURF1_No_Tx" = "purple",
+  "SURF1_DEX" = "maroon",
+  "Control_Oligo" = "violet",
+  "Control_mitoNUITs" = "orange",
+  "Control_DEX_mitoNUITs" = "lightpink",
+  "Control_DEX_Oligo" = "blue",
+  "Control_ox3" = "lightgreen",
+  "Control_Contact_Inhibition" = "green",
+  "Control_Contact_Inhibition_ox3" = "darkgreen",
+  "Control_Galactose" = "lightblue",
+  "Control_betahydroxybutyrate" = "skyblue",
+  "Control_2DG" = "yellow"
+)
+
+Factor_results_scores <- (fa_result[["scores"]])
+
+
+# Assuming 'Factor_results' is your Factor object and 'x' contains the Factor scores
+fa_scores <- fa_result$scores[, chosen_Factor]  # Extract the scores for the first principal component
+AgeCorr <- WT_SURF1_all_Txs
+AgeCorr$fa_Scores <- fa_scores
+
+
+# DO WE WANT A LINEAR REGRESSION OR A CORRELATION????????????????????????????????????????????????????????????????????????
+#------------------------------------------------------------------------------------------------------------------------
+
+
+
+# Perform a linear model to get coefficients and p-value
+mdl <- lm(fa_Scores ~ DaysGrown, data = AgeCorr)
+hist(resid(mdl))
+summary(mdl)
+summary_fit <- summary(mdl)
+residuals <- resid(mdl)
+shapiro_test <- shapiro.test(residuals)
+print(shapiro_test)
+
+slope <- summary_fit$coefficients[2, 1]
+p_value <- summary_fit$coefficients[2, 4]
+r_squared <- summary_fit$r.squared
+
+# Create the plot
+plot <- ggplot(AgeCorr, aes(x = DaysGrown, y = fa_Scores, color = intx)) +
+    geom_point(alpha = 0.5, size = 5) +
+    geom_smooth(method = "lm", color = "red") +
+    scale_color_manual(values = color_palette) +
+    labs(x = "Standardized GDF15 Expression", y = chosen_Factor, title = paste("Correlation between GDF15 and FA score:", chosen_Factor)) +
+    theme_minimal() +
+        theme(
+        axis.text.x = element_text(size = 24),  # Increase x-axis numbers size
+        axis.text.y = element_text(size = 24)   # Increase y-axis numbers size
+    ) +
+    geom_text(aes(label = paste("Slope:", round(slope, 3), "p-value:", signif(p_value, 3), "R-squared:", round(r_squared, 3))),
+              x = Inf, y = Inf, hjust = 1.1, vjust = 1.1, size = 3.5, color = "black")
+
+# Print the plot
+print(plot)
+
+     #   Generate a dynamic file name
+  file_name <- paste0(file_path, paste0("/FA_All_Factors_vs_GDF15/lnRegMdl_plusGroup_plusDaysGrown", chosen_Factor, "scoresvsGDF15.png"))
+  
+  if (Plot_Save == "ON") {
+        ggsave(file_name, plot = plot, width = 14, height = 10, dpi = 300)
+    
+  }
+
+
+
+
+
+# Calculate Spearman's correlation
+spearman_test <- cor.test(AgeCorr$DaysGrown, AgeCorr$fa_Scores, method = "spearman")
+spearman_rho <- spearman_test$estimate  # Spearman's rho
+spearman_p <- spearman_test$p.value     # p-value
+
+# Format p-value for display
+if (spearman_p < 0.0001) {
+    p_value_text <- "p < 0.0001"
+} else {
+    p_value_text <- paste("p-value:", signif(spearman_p, 3))
+}
+
+# Create the plot with Spearman's rho and formatted p-value
+plot <- ggplot(AgeCorr, aes(x = DaysGrown, y = fa_Scores, color = intx)) +
+    geom_point(alpha = 0.5, size = 5) +
+    geom_smooth(method = "lm", color = "red") +  # Linear model for visual trend
+    scale_color_manual(values = color_palette) +
+    labs(x = "DaysGrown", y = paste( chosen_Factor, " Scores"), title = paste("Age and", chosen_Factor, " Score", " Spearman's rho:", round(spearman_rho, 3), p_value_text)) +
+    theme_minimal() +
+        theme(
+        axis.text.x = element_text(size = 24),  # Increase x-axis numbers size
+        axis.text.y = element_text(size = 24)   # Increase y-axis numbers size
+    ) +
+    geom_text(aes(label = ""), 
+              x = Inf, y = Inf, hjust = 1.1, vjust = 1.1, size = 8, color = "black") +  # Adjust text size here
+    theme(
+        axis.title = element_text(size = 14),  # Adjust axis title size
+        axis.text = element_text(size = 14),   # Adjust axis text size
+        plot.title = element_text(size = 16, face = "bold")  # Adjust title size
+    )
+
+# Print the plot
+print(plot)
+
+  
+FA_Index_Scores <- AgeCorr %>%
+  select(SampleID, Group, DaysGrown, intx, fa_Scores)
+
+     #   Generate a dynamic file name
+  file_name <- paste0(file_path, paste0("/FA_All_Factors_vs_AgeDaysGrown/", chosen_Factor, "scoresvsAge_biggerdots.png"))
+
+  if (Plot_Save == "ON") {
+        ggsave(file_name, plot = plot, width = 14, height = 10, dpi = 300)
+    
+    write.csv(FA_Index_Scores, paste0(file_path, "/", chosen_Factor, "_ISR_Scores_per_Sample_Age_DaysGrown.csv"))
+    
+  }
+
+  toAdd <- AgeCorr %>%
+    select(SampleID, fa_Scores)
+    
+  FA_Scores <- merge(FA_Scores, toAdd[, c("SampleID", "fa_Scores")], by = "SampleID", all.x = TRUE)  
+  
+    FA_Scores <- FA_Scores %>%
+    rename(!!chosen_Factor := fa_Scores)
+  
+  }
+  
+}
+
+ 
+```  
+
+
+
+Factor vs DaysGrown for each individual intx of a given factor
+``` {r}
+
+
+Plot_Save <- "ON"
+# Assuming 'fa_result' and 'AgeCorr' have been defined as in your code
+
+# Get column names that start with "Factor"
+column_names <- colnames(fa_result$scores)
+factor_columns <- column_names[startsWith(column_names, "Factor")]
+
+# Loop through each chosen_Factor
+for (chosen_Factor in factor_columns) {
+  # Extract the scores for the chosen_Factor
+  fa_scores <- fa_result$scores[, chosen_Factor]
+  AgeCorr$fa_Scores <- fa_scores
+  
+  # Get unique 'intx' values
+  unique_intx <- unique(AgeCorr$intx)
+  
+  # Loop through each 'intx'
+  for (current_intx in unique_intx) {
+    # Subset the data for the current 'intx'
+    subset_data <- AgeCorr[AgeCorr$intx == current_intx, ]
+    
+    # Check if there are enough data points
+    if (nrow(subset_data) < 3) {
+      print(paste("Not enough data for intx:", current_intx, "and Factor:", chosen_Factor))
+      next  # Skip to the next iteration
+    }
+    
+    # Perform a linear model to get coefficients and p-value
+    mdl <- lm(fa_Scores ~ DaysGrown, data = subset_data)
+    residuals <- resid(mdl)
+    summary_fit <- summary(mdl)
+    shapiro_test <- shapiro.test(residuals)
+    
+    slope <- summary_fit$coefficients[2, 1]
+    p_value <- summary_fit$coefficients[2, 4]
+    r_squared <- summary_fit$r.squared
+    
+    # Calculate Spearman's correlation
+    spearman_test <- cor.test(subset_data$DaysGrown, subset_data$fa_Scores, method = "spearman")
+    spearman_rho <- spearman_test$estimate  # Spearman's rho
+    spearman_p <- spearman_test$p.value     # p-value
+    
+    # Format p-value for display
+    if (spearman_p < 0.0001) {
+      p_value_text <- "p < 0.0001"
+    } else {
+      p_value_text <- paste("p-value:", signif(spearman_p, 3))
+    }
+    
+    # Create the plot
+    plot <- ggplot(subset_data, aes(x = DaysGrown, y = fa_Scores)) +
+      geom_point(alpha = 0.5, size = 5, color = color_palette[current_intx]) +
+      geom_smooth(method = "lm", color = "red") +
+      labs(
+        x = "DaysGrown",
+        y = paste(chosen_Factor, "Scores"),
+        title = paste("Age vs.", chosen_Factor, "Score\n",
+                      "Intx:", current_intx,
+                      "Spearman's rho:", round(spearman_rho, 3), p_value_text)
+      ) +
+      theme_minimal() +
+      theme(
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 12),
+        plot.title = element_text(size = 16, face = "bold")
+      )
+    
+    # Print the plot
+    print(plot)
+    
+    # Generate a dynamic file name
+    file_name <- paste0(
+      file_path,
+      "/FA_All_Factors_vs_AgeDaysGrown/FA_Factor_vs_Age_by_Intx/",
+      chosen_Factor, "_vs_Age_", current_intx, ".png"
+    )
+    
+    # Save the plot if Plot_Save is "ON"
+    if (Plot_Save == "ON") {
+      ggsave(file_name, plot = plot, width = 14, height = 10, dpi = 300)
+    }
+  }
+}
+
+
+
+
+
+```
+
+
+
+#Chosen Genes vs age 
+``` {r}
+library(boot)
+other_genes <- c("GDF15", "ATF4", "ATF5", "DDIT3", "CDKN1A", "CDKN2A", "CCND2", "MKI67", "RRM2", "TOP2A")
+
+genes_of_interest <- other_genes
+
+datasets <- process_datasets(data_sub, genes_of_interest)
+WT_SURF1_all_Txs <- datasets$WT_SURF1_all_Txs # Access the WT_SURF1_all_Txs dataset
+
+# Center and scale the selected columns
+WT_SURF1_all_Txs[, genes_of_interest] <- scale(WT_SURF1_all_Txs[, genes_of_interest])
+
+data <- WT_SURF1_all_Txs %>%
+  rowwise() %>%
+  mutate(
+    sen_mean = mean(c_across(c(CDKN1A, CDKN2A, CCND2)), na.rm = TRUE),
+    sen_sem = sd(c_across(c(CDKN1A, CDKN2A, CCND2)), na.rm = TRUE) / sqrt(sum(!is.na(c_across(c(CDKN1A, CDKN2A, CCND2))))),
+    prolif_mean = mean(c_across(c(MKI67, RRM2, TOP2A)), na.rm = TRUE),
+    prolif_sem = sd(c_across(c(MKI67, RRM2, TOP2A)), na.rm = TRUE) / sqrt(sum(!is.na(c_across(c(MKI67, RRM2, TOP2A)))))    
+  )
+
+
+data <- merge(data, FA_Scores, by = "SampleID")
+
+# Define custom colors for each specific column
+color_mapping <- c(
+  "GDF15" = "pink",
+  "Factor1" = "red",
+  "Factor2" = "#808080",
+  "Factor3" = "#808080",
+  "Factor4" = "#CCCCCC",
+  "Factor5" = "#CCCCCC",
+  "Factor6" = "#CCCCCC",
+  "Factor7" = "#808080",
+  "Factor8" = "#CCCCCC",
+  "Factor9" = "#808080",
+  "Factor10" = "#CCCCCC",
+  "Factor11" = "#808080",
+  "Factor12" = "#808080",
+  "ATF4" = "orange",  # tomato red
+  "DDIT3" = "lightblue",  # firebrick red
+  "ATF5" = "brown",    # dark red
+  "sen_mean" = "blue",   
+  "prolif_mean" = "purple"
+)
+
+for_spearman_order <- c("GDF15", "sen_mean", "prolif_mean", "ATF4", "ATF5", "DDIT3", "Factor1", "Factor12", "Factor6", "Factor2", "Factor4", "Factor9", "Factor8", "Factor3", "Factor10", "Factor7", "Factor5", "Factor11")
+
+
+# Number of comparisons for Bonferroni correction
+n_comparisons <- length(for_spearman_order)
+
+library(boot)
+
+# Function to calculate Spearman's rho for bootstrapping
+spearman_boot <- function(data, indices, col) {
+  sample_data <- data[indices, ]
+  cor(sample_data[[col]], sample_data$DaysGrown, method = "spearman")
+}
+
+# Initialize a results dataframe with confidence intervals
+spearman_results <- data.frame(
+  Column = character(),
+  Spearman_Rho = numeric(),
+  P_Value = numeric(),
+  Adjusted_P_Value = numeric(),
+  CI_Lower = numeric(),
+  CI_Upper = numeric(),
+  Significant = character(),
+  stringsAsFactors = FALSE
+)
+
+# Loop through each column in for_spearman_order
+for (col in for_spearman_order) {
+  # Calculate Spearman correlation
+  test <- cor.test(data[[col]], data$DaysGrown, method = "spearman")
+  
+  # Extract results
+  rho <- test$estimate
+  p_value <- test$p.value
+  adj_p_value <- p_value * n_comparisons  # Bonferroni correction
+  significant <- ifelse(adj_p_value < 0.05, "Yes", "No")
+  
+  # Bootstrap for 95% confidence interval
+  boot_result <- boot(data, statistic = spearman_boot, R = 1000, col = col)
+  ci <- boot.ci(boot_result, type = "perc")$percent[4:5]  # Percentile method CI
+  
+  # Add results to dataframe
+  spearman_results <- spearman_results %>%
+    add_row(
+      Column = col,
+      Spearman_Rho = rho,
+      P_Value = p_value,
+      Adjusted_P_Value = adj_p_value,
+      CI_Lower = ci[1],
+      CI_Upper = ci[2],
+      Significant = significant
+    )
+}
+
+# Ensure the order of the columns matches for_spearman_order
+spearman_results <- spearman_results %>%
+  mutate(Column = factor(Column, levels = rev(for_spearman_order)))  # Reverse order for highest to lowest in the plot
+
+# Create the summary plot with error bars and color mapping
+spearman_plot <- ggplot(spearman_results, aes(x = Spearman_Rho, y = Column, fill = Column, color = Column)) +
+  geom_point(shape = 21, size = 6) +  # Point with custom fill
+  geom_errorbarh(aes(xmin = CI_Lower, xmax = CI_Upper), height = 0.3, size = 0.8) +  # Error bars with color
+  geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+  scale_fill_manual(values = color_mapping) +  # Apply custom colors to fill
+  scale_color_manual(values = color_mapping) +  # Apply custom colors to error bars
+  labs(x = "Spearman Rho", y = "Columns", title = "Spearman Rho Values for Each Column vs DaysGrown") +
+  theme_minimal() +
+   theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 14, color = "black"),  # Black axis titles
+    axis.text = element_text(size = 12, color = "black"),  # Black axis text
+    axis.ticks = element_line(size = 0.25, color = "black"),  # Thin black axis ticks
+    panel.grid.major.y = element_blank(),  # Remove major x gridlines
+    panel.grid.minor.y = element_blank(),  # Remove minor x gridlines
+    panel.grid.major.x = element_line(size = 0.1, color = "black"),  # Thin black major y gridlines
+    panel.grid.minor.x = element_line(size = 0.08, color = "black"),  # Thin black minor y gridlines
+    panel.background = element_blank(),  # Remove panel background
+    panel.border = element_blank(),  # Remove panel border
+    legend.position = "none"  # Hide legend
+  )
+
+
+# Print the plot
+print(spearman_plot)
+
+# Save the summary plot
+file_name <- paste0(subfolder_path, "/Fig2G_Spearman_Rho_Summary_Plot_Fibroblasts_With_CI.png")
+ggsave(file_name, plot = spearman_plot, width = 5, height = 8, dpi = 300)
+
+
+# Save the results as a CSV
+csv_name <- paste0(subfolder_path, "/Spearman_Rho_Summary_With_CI.csv")
+write.csv(spearman_results, file = csv_name, row.names = FALSE)
+
+
+
+
+
+# Create the summary plot with error bars and color mapping
+spearman_plot <- ggplot(spearman_results, aes(x = Spearman_Rho, y = Column, fill = Column, color = Column)) +
+  geom_point(shape = 21, size = 6) +  # Point with custom fill
+  geom_errorbarh(aes(xmin = CI_Lower, xmax = CI_Upper), height = 0.3, size = 0.5) +  # Error bars with color
+  geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+  scale_fill_manual(values = color_mapping) +  # Apply custom colors to fill
+  scale_color_manual(values = color_mapping) +  # Apply custom colors to error bars
+  labs(x = "Spearman Rho", y = "Columns", title = "Spearman Rho Values for Each Column vs DaysGrown") +
+  theme_minimal() +
+   theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 14, color = "black"),  # Black axis titles
+    axis.text = element_text(size = 12, color = "black"),  # Black axis text
+    axis.ticks = element_line(size = 0.25, color = "black"),  # Thin black axis ticks
+    panel.grid.major.y = element_blank(),  # Remove major x gridlines
+    panel.grid.minor.y = element_blank(),  # Remove minor x gridlines
+    panel.grid.major.x = element_line(size = 0.1, color = "black"),  # Thin black major y gridlines
+    panel.grid.minor.x = element_line(size = 0.08, color = "black"),  # Thin black minor y gridlines
+    panel.background = element_blank(),  # Remove panel background
+    panel.border = element_blank(),  # Remove panel border
+    legend.position = "none"  # Hide legend
+  )
+
+
+# Print the plot
+print(spearman_plot)
+
+file_name <- paste0(subfolder_path, "/Fig2G_Spearman_Rho_Summary_Plot_Fibroblasts_With_CI_smaller_errorBars.png")
+ggsave(file_name, plot = spearman_plot, width = 5, height = 8, dpi = 300)
+
+
+
+# Create the summary plot with error bars and color mapping
+spearman_plot <- ggplot(spearman_results, aes(x = Spearman_Rho, y = Column, fill = Column, color = Column)) +
+    geom_point(
+    aes(shape = factor(
+      case_when(
+        Column == "Factor1" ~ 8,    # Star for Factor1_vs_AGE_SpearmanRhos
+        Column == "GDF15" ~ 22,            # Square for Spearman_Rho_GDF15
+        TRUE ~ 21                                       # Circle for all other factors
+      )
+    )), 
+    size = 6
+  ) + # Point with custom fill
+  geom_errorbarh(aes(xmin = CI_Lower, xmax = CI_Upper), height = 0.3, size = 0.8) +  # Error bars with color
+  geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+  scale_fill_manual(values = color_mapping) +  # Apply custom colors to fill
+  scale_color_manual(values = color_mapping) +  # Apply custom colors to error bars
+  labs(x = "Spearman Rho", y = "Columns", title = "Spearman Rho Values for Each Column vs DaysGrown") +
+  theme_minimal() +
+   theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 14, color = "black"),  # Black axis titles
+    axis.text = element_text(size = 12, color = "black"),  # Black axis text
+    axis.ticks = element_line(size = 0.25, color = "black"),  # Thin black axis ticks
+    panel.grid.major.y = element_blank(),  # Remove major x gridlines
+    panel.grid.minor.y = element_blank(),  # Remove minor x gridlines
+    panel.grid.major.x = element_line(size = 0.1, color = "black"),  # Thin black major y gridlines
+    panel.grid.minor.x = element_line(size = 0.08, color = "black"),  # Thin black minor y gridlines
+    panel.background = element_blank(),  # Remove panel background
+    panel.border = element_blank(),  # Remove panel border
+    legend.position = "none"  # Hide legend
+  )
+
+
+# Print the plot
+print(spearman_plot)
+
+# Save the summary plot
+file_name <- paste0(subfolder_path, "/Fig2G_Spearman_Rho_Summary_Plot_Fibroblasts_With_CI_Triangle_Square_Circle.png")
+ggsave(file_name, plot = spearman_plot, width = 5, height = 8, dpi = 300)
+
+
+# Create the summary plot with error bars and color mapping
+spearman_plot <- ggplot(spearman_results, aes(x = Spearman_Rho, y = Column, fill = Column, color = Column)) +
+    geom_point(
+    aes(shape = factor(
+      case_when(
+        Column == "Factor1" ~ 21,    # Star for Factor1_vs_AGE_SpearmanRhos
+        # Column == "GDF15" ~ 22,            # Square for Spearman_Rho_GDF15
+        TRUE ~ 8                                       # Circle for all other factors
+      )
+    )), 
+    size = 6
+  ) + # Point with custom fill
+  geom_errorbarh(aes(xmin = CI_Lower, xmax = CI_Upper), height = 0.3, size = 0.5) +  # Error bars with color
+  geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+  scale_fill_manual(values = color_mapping) +  # Apply custom colors to fill
+  scale_color_manual(values = color_mapping) +  # Apply custom colors to error bars
+  labs(x = "Spearman Rho", y = "Columns", title = "Spearman Rho Values for Each Column vs DaysGrown") +
+  theme_minimal() +
+   theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 14, color = "black"),  # Black axis titles
+    axis.text = element_text(size = 12, color = "black"),  # Black axis text
+    axis.ticks = element_line(size = 0.25, color = "black"),  # Thin black axis ticks
+    panel.grid.major.y = element_blank(),  # Remove major x gridlines
+    panel.grid.minor.y = element_blank(),  # Remove minor x gridlines
+    panel.grid.major.x = element_line(size = 0.1, color = "black"),  # Thin black major y gridlines
+    panel.grid.minor.x = element_line(size = 0.08, color = "black"),  # Thin black minor y gridlines
+    panel.background = element_blank(),  # Remove panel background
+    panel.border = element_blank(),  # Remove panel border
+    legend.position = "none"  # Hide legend
+  )
+
+
+# Print the plot
+print(spearman_plot)
+
+# Save the summary plot
+file_name <- paste0(subfolder_path, "/Fig2G_Spearman_Rho_Summary_Plot_Fibroblasts_With_CI_Triangle.png")
+ggsave(file_name, plot = spearman_plot, width = 5, height = 8, dpi = 300)
+
+```
+
+
